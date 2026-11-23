@@ -1,2 +1,2 @@
 # video-colab
-Code for the Kaggle video-generation experiment (public, no secrets)
+Code that runs inside the Kaggle notebook for the video-generation experiment (public, no secrets).
