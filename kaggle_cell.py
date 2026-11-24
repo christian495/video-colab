@@ -209,21 +209,26 @@ def load_models():
         notify("model", 70 + 6 * (gi + 1), "Nakakarga ang GPU %d" % (gi + 1))
 
 
-def encode(text, gi):
-    """Prompt -> T5 embeddings. The big text encoder visits the GPU for a few seconds, then goes back to RAM."""
+def encode_pair(text, pipe, gi):
+    """Prompt and empty negative prompt -> T5 embeddings. The big text encoder (9.5 GB) and the video model (4 GB) do not fit
+    together on one 15 GB T4, so the video model steps aside to RAM for a few seconds while the text encoder works."""
     import torch
     tok, te = TE["tok"], TE["model"]
-    ids = tok(text, padding="max_length", max_length=226, truncation=True, add_special_tokens=True, return_tensors="pt").input_ids
+    dev = "cuda:%d" % gi
+    ids = tok([text, ""], padding="max_length", max_length=226, truncation=True, add_special_tokens=True, return_tensors="pt").input_ids
     with TE_LOCK:
         try:
-            te.to("cuda:%d" % gi)
+            pipe.transformer.to("cpu")
+            torch.cuda.empty_cache()
+            te.to(dev)
             with torch.no_grad():
-                emb = te(ids.to("cuda:%d" % gi))[0]
-            emb = emb.to("cuda:%d" % gi, dtype=torch.float16).clone()
+                emb = te(ids.to(dev))[0]
+            emb = emb.to(torch.float16).clone()
         finally:
             te.to("cpu")
             torch.cuda.empty_cache()
-    return emb
+            pipe.transformer.to(dev)
+    return emb[0:1], emb[1:2]
 
 
 def save_mp4(frames, path, fps):
@@ -241,8 +246,7 @@ def run_job(j, gi):
     cfg = MODELS[j["model"]]
     pipe = PIPES[gi]
     j["msg"] = "Inihahanda ang prompt"
-    pe = encode(j["prompt"], gi)
-    ne = encode("", gi)
+    pe, ne = encode_pair(j["prompt"], pipe, gi)
     steps = int(j["steps"] or cfg["steps"])
 
     def cb(p, i, t, kw):
@@ -406,8 +410,7 @@ try:
         import torch
         t0 = time.time()
         for _gi in range(NGPU):
-            pe = encode("a red balloon floating over green hills, sunny day", _gi)
-            ne = encode("", _gi)
+            pe, ne = encode_pair("a red balloon floating over green hills, sunny day", PIPES[_gi], _gi)
             fr = PIPES[_gi](prompt_embeds=pe, negative_prompt_embeds=ne, num_frames=17, num_inference_steps=8, guidance_scale=6.0,
                             height=480, width=720, generator=torch.Generator(device="cpu").manual_seed(1)).frames[0]
             sd = float(np.asarray(fr[len(fr) // 2]).astype("float32").std())
